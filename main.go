@@ -29,6 +29,14 @@ type User struct {
 	Email     string    `json:"email"`
 }
 
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	User_id   uuid.UUID `json:"user_id"`
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -93,28 +101,12 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(dat)
 }
 
-func validateChirps(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body string `json:"body"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	param := parameters{}
-	err := decoder.Decode(&param)
-	if err != nil {
-		// Fehler beim Dekodieren des JSON-Bodies
-		// Der Client hat ungültiges JSON gesendet
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
-		return
-	}
-
-	chirpText := param.Body
+func validateChirps(chirpText string) (string, error) {
 	maxLength := 140
 
 	if len(chirpText) > maxLength {
 		// Chirp ist zu lang
-		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("Chirp is too long. Max length is %d characters.", maxLength))
-		return
+		return "", fmt.Errorf("Chirp is too long. Max length is %d characters.", maxLength)
 	}
 	cleanedChirp := cleanChirp(chirpText)
 
@@ -122,11 +114,7 @@ func validateChirps(w http.ResponseWriter, r *http.Request) {
 		Cleaned_Body string `json:"cleaned_body"`
 	}
 
-	resp := successResponse{
-		Cleaned_Body: cleanedChirp,
-	}
-
-	respondWithJSON(w, http.StatusOK, resp)
+	return cleanedChirp, nil
 }
 
 func cleanChirp(text string) string {
@@ -175,6 +163,86 @@ func (cfg *apiConfig) createNewUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, resp)
 }
 
+func (cfg *apiConfig) postChirp(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body string    `json:"body"`
+		Id   uuid.UUID `json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	param := parameters{}
+	err := decoder.Decode(&param)
+	if err != nil {
+		// Fehler beim Dekodieren des JSON-Bodies
+		// Der Client hat ungültiges JSON gesendet
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+
+	chirpText, err := validateChirps(param.Body)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Valdation of Chirp failed!")
+	}
+	var chirpdata database.CreateChirpsParams
+	chirpdata.Body = chirpText
+	chirpdata.UserID = param.Id
+	chirp, err := cfg.DB.CreateChirps(r.Context(), chirpdata)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "smth went wrong Creating the Chirp!")
+		return
+	}
+	resp := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		User_id:   chirp.UserID,
+	}
+	respondWithJSON(w, http.StatusCreated, resp)
+}
+
+func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.DB.Allchirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error retrieving chirps")
+		return
+	}
+	var allChirps []Chirp
+	for _, chirp := range chirps {
+		newChirp := Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			User_id:   chirp.UserID,
+		}
+		allChirps = append(allChirps, newChirp)
+	}
+	respondWithJSON(w, http.StatusOK, allChirps)
+}
+func (cfg *apiConfig) getChipById(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error parsing ID!")
+		return
+	}
+
+	chirp, err := cfg.DB.GetChirpById(r.Context(), id)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Error retrieving chirp")
+		return
+	}
+	newChirp := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		User_id:   chirp.UserID,
+	}
+	respondWithJSON(w, http.StatusOK, newChirp)
+}
+
 func main() {
 	godotenv.Load()
 	mux := http.NewServeMux()
@@ -196,8 +264,10 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirps)
 	mux.HandleFunc("POST /api/users", apiCfg.createNewUser)
+	mux.HandleFunc("POST /api/chirps", apiCfg.postChirp)
+	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChipById)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
