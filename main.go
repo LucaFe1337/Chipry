@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LucaFe1337/Chipry/internal/auth"
 	"github.com/LucaFe1337/Chipry/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -136,7 +137,8 @@ func cleanChirp(text string) string {
 
 func (cfg *apiConfig) createNewUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -149,11 +151,20 @@ func (cfg *apiConfig) createNewUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := cfg.DB.CreateUser(r.Context(), param.Email)
+	var userParams database.CreateUserParams
+	userParams.Email = param.Email
+	userParams.HashedPassword, err = auth.HashPassword(param.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Erorr trying to Hash the password!")
+		return
+	}
+
+	user, err := cfg.DB.CreateUser(r.Context(), userParams)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "smth went wrong Creating the user!")
 		return
 	}
+
 	resp := User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
@@ -243,6 +254,39 @@ func (cfg *apiConfig) getChipById(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, newChirp)
 }
 
+func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	param := parameters{}
+	err := decoder.Decode(&param)
+	if err != nil {
+		// Fehler beim Dekodieren des JSON-Bodies
+		// Der Client hat ungültiges JSON gesendet
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+	user, err := cfg.DB.GetPasswordFromEmail(r.Context(), param.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error retrieving user data")
+		return
+	}
+	err = auth.CheckPassword(user.HashedPassword, param.Password)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Wrong Password!")
+		return
+	}
+	resp := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
 func main() {
 	godotenv.Load()
 	mux := http.NewServeMux()
@@ -268,6 +312,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChipById)
+	mux.HandleFunc("POST /api/login", apiCfg.authenticateLogin)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
