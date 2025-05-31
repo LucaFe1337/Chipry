@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -76,5 +77,14 @@ func TestValidateJWT_EmptyToken(t *testing.T) {
 	_, err := ValidateJWT("", secret)
 	if err == nil {
 		t.Fatal("Expected error for empty token, got nil")
+	}
+}
+
+func TestGetBearerToken_emptyToken(t *testing.T) {
+	header := make(http.Header)
+	header.Set("Authorization", "")
+	_, err := GetBearerToken(header)
+	if err == nil {
+		t.Fatal(("Expected error for missing Authorization"))
 	}
 }

@@ -1,0 +1,2 @@
+-- name: GetUserFromRefreshToken :one
+SELECT users.id, refresh_token.token, refresh_token.expires_at, refresh_token.revoked_at FROM refresh_token JOIN users ON users.id = refresh_token.user_id WHERE token = $1;

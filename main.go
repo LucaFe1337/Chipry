@@ -21,6 +21,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	PLATFORM       string
+	Secret         string
 }
 
 type User struct {
@@ -176,27 +177,35 @@ func (cfg *apiConfig) createNewUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) postChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body string    `json:"body"`
-		Id   uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	param := parameters{}
 	err := decoder.Decode(&param)
 	if err != nil {
-		// Fehler beim Dekodieren des JSON-Bodies
-		// Der Client hat ungültiges JSON gesendet
 		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+	token_string, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Token invalid")
+		return
+	}
+	userID, err := auth.ValidateJWT(token_string, cfg.Secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Token invalid")
 		return
 	}
 
 	chirpText, err := validateChirps(param.Body)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Valdation of Chirp failed!")
+		return
 	}
 	var chirpdata database.CreateChirpsParams
 	chirpdata.Body = chirpText
-	chirpdata.UserID = param.Id
+	chirpdata.UserID = userID
 	chirp, err := cfg.DB.CreateChirps(r.Context(), chirpdata)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "smth went wrong Creating the Chirp!")
@@ -278,13 +287,89 @@ func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) 
 		respondWithError(w, http.StatusUnauthorized, "Wrong Password!")
 		return
 	}
-	resp := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+	token_string, err := auth.MakeJWT(user.ID, cfg.Secret, time.Duration(3600)*time.Second)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating token string")
+		return
+	}
+	token, _ := auth.MakeRefreshToken()
+	refresh_token_params := database.CreateRefreshTokenParams{
+		Token:     token,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	}
+	refresh_token, err := cfg.DB.CreateRefreshToken(r.Context(), refresh_token_params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating refresh token")
+		return
+	}
+	resp := struct {
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
+	}{
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        token_string,
+		RefreshToken: refresh_token.Token,
 	}
 	respondWithJSON(w, http.StatusOK, resp)
+}
+
+func (cfg *apiConfig) refreshToken(w http.ResponseWriter, r *http.Request) {
+	refresh_token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token")
+		return
+	}
+	data, err := cfg.DB.GetUserFromRefreshToken(r.Context(), refresh_token)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "error receiving user and refresh token data")
+		return
+	}
+	if data.RevokedAt.Valid {
+		respondWithError(w, http.StatusUnauthorized, "refresh token revoked")
+		return
+	}
+	if data.ExpiresAt.Before(time.Now()) {
+		respondWithError(w, http.StatusUnauthorized, "refresh token expired")
+		return
+	}
+	access_token, err := auth.MakeJWT(data.ID, cfg.Secret, time.Duration(3600)*time.Second)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error creating acces token")
+		return
+	}
+
+	resp := struct {
+		Token string `json:"token"`
+	}{
+		Token: access_token,
+	}
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	refresh_token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token")
+		return
+	}
+	var revoke_params database.RevokeRefreshTokenParams
+	revoke_params.RevokedAt.Time = time.Now()
+	revoke_params.Token = refresh_token
+
+	err = cfg.DB.RevokeRefreshToken(r.Context(), revoke_params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error revoking token")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -297,12 +382,14 @@ func main() {
 	}
 	dbQueries := database.New(db)
 	platform := os.Getenv("PLATFORM")
+	secret := os.Getenv("SECRET")
 
 	fs := http.FileServer(http.Dir("."))
 
 	apiCfg := apiConfig{
 		DB:       dbQueries,
 		PLATFORM: platform,
+		Secret:   secret,
 	}
 
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
@@ -313,6 +400,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChipById)
 	mux.HandleFunc("POST /api/login", apiCfg.authenticateLogin)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
