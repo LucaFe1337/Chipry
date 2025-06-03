@@ -324,7 +324,8 @@ func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) 
 func (cfg *apiConfig) refreshToken(w http.ResponseWriter, r *http.Request) {
 	refresh_token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token")
+		fmt.Printf("refresh token wrong format: %s", refresh_token)
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token:")
 		return
 	}
 	data, err := cfg.DB.GetUserFromRefreshToken(r.Context(), refresh_token)
@@ -357,16 +358,99 @@ func (cfg *apiConfig) refreshToken(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
 	refresh_token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token")
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token, in revoke refresh")
 		return
 	}
 	var revoke_params database.RevokeRefreshTokenParams
 	revoke_params.RevokedAt.Time = time.Now()
+	revoke_params.RevokedAt.Valid = true
 	revoke_params.Token = refresh_token
 
 	err = cfg.DB.RevokeRefreshToken(r.Context(), revoke_params)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "error revoking token")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) changeUserData(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	access_token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refesh token, in revoke refresh")
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	param := parameters{}
+	err = decoder.Decode(&param)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+	var newUserData database.UpdateUserDataParams
+	userID, err := auth.ExtractUserIDFromJWT(access_token, cfg.Secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "error parsing userID from token")
+		return
+	}
+	newUserData.ID = userID
+	newUserData.Email = param.Email
+	new_hashed_passwd, err := auth.HashPassword(param.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error hashing new password")
+	}
+	newUserData.HashedPassword = new_hashed_passwd
+	newUserData.UpdatedAt = time.Now()
+	err = cfg.DB.UpdateUserData(r.Context(), newUserData)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error updating user data")
+		return
+	}
+	resp := User{
+		ID:        userID,
+		CreatedAt: newUserData.UpdatedAt,
+		UpdatedAt: newUserData.UpdatedAt,
+		Email:     param.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
+func (cfg *apiConfig) deleteChirpyById(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	parsed_chirpID, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error parsing chirpID into uuid")
+		return
+	}
+	// get chirp
+	chirp, err := cfg.DB.GetChirpById(r.Context(), parsed_chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "error getting chirp out of db")
+		return
+	}
+	// get user data
+	access_token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Error receiving refresh token, in revoke refresh")
+		return
+	}
+	userID, err := auth.ExtractUserIDFromJWT(access_token, cfg.Secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "error parsing userID from token")
+		return
+	}
+	if userID != chirp.UserID {
+		respondWithError(w, http.StatusForbidden, "user is not the author of the chirp, cant delete other users chirps")
+		return
+	}
+	err = cfg.DB.DeleteChripyById(r.Context(), parsed_chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "error deleting chirp, not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -402,6 +486,8 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.authenticateLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refreshToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
+	mux.HandleFunc("PUT /api/users", apiCfg.changeUserData)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpyById)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
