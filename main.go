@@ -22,6 +22,7 @@ type apiConfig struct {
 	DB             *database.Queries
 	PLATFORM       string
 	Secret         string
+	POLKA_API_KEY  string
 }
 
 type User struct {
@@ -29,6 +30,7 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Red       bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -310,6 +312,7 @@ func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) 
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		Red          bool      `json:"is_chirpy_red"`
 	}{
 		ID:           user.ID,
 		CreatedAt:    user.CreatedAt,
@@ -317,6 +320,7 @@ func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) 
 		Email:        user.Email,
 		Token:        token_string,
 		RefreshToken: refresh_token.Token,
+		Red:          user.IsChirpyRed,
 	}
 	respondWithJSON(w, http.StatusOK, resp)
 }
@@ -456,6 +460,42 @@ func (cfg *apiConfig) deleteChirpyById(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type data struct {
+	UserId uuid.UUID `json:"user_id"`
+}
+
+func (cfg *apiConfig) UpgradeUserToRed(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  data   `json:"data"`
+	}
+	api_key, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "api key not found in header")
+		return
+	}
+	if api_key != cfg.POLKA_API_KEY {
+		respondWithError(w, http.StatusUnauthorized, "api key doesnt match")
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	param := parameters{}
+	err = decoder.Decode(&param)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+	if param.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	err = cfg.DB.UpdateUserToRed(r.Context(), param.Data.UserId)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "user not found, couldnt upgrade")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	godotenv.Load()
 	mux := http.NewServeMux()
@@ -467,13 +507,15 @@ func main() {
 	dbQueries := database.New(db)
 	platform := os.Getenv("PLATFORM")
 	secret := os.Getenv("SECRET")
+	polka_api_key := os.Getenv("POLKA_KEY")
 
 	fs := http.FileServer(http.Dir("."))
 
 	apiCfg := apiConfig{
-		DB:       dbQueries,
-		PLATFORM: platform,
-		Secret:   secret,
+		DB:            dbQueries,
+		PLATFORM:      platform,
+		Secret:        secret,
+		POLKA_API_KEY: polka_api_key,
 	}
 
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
@@ -488,6 +530,7 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 	mux.HandleFunc("PUT /api/users", apiCfg.changeUserData)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpyById)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.UpgradeUserToRed)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")

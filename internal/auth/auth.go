@@ -105,3 +105,17 @@ func MakeRefreshToken() (string, error) {
 	refresh_token := hex.EncodeToString(refresh_token_in_byte)
 	return refresh_token, nil
 }
+
+func GetAPIKey(headers http.Header) (string, error) {
+	authorization := headers.Get("Authorization")
+	if authorization == "" {
+		return "", fmt.Errorf("no authorization in the header")
+	}
+	if !strings.HasPrefix(authorization, "ApiKey") {
+		return "", fmt.Errorf("API Key in wrong format")
+	}
+	if len(authorization) < 7 {
+		return "", fmt.Errorf("authorization string too short, must be false")
+	}
+	return authorization[7:], nil
+}
