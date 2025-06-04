@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -224,11 +225,29 @@ func (cfg *apiConfig) postChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.DB.Allchirps(r.Context())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error retrieving chirps")
-		return
+	author_id := r.URL.Query().Get("author_id")
+	sorting := r.URL.Query().Get("sort")
+	var chirps []database.Chirp
+	if author_id == "" {
+		var innererror error
+		chirps, innererror = cfg.DB.Allchirps(r.Context())
+		if innererror != nil {
+			respondWithError(w, http.StatusInternalServerError, "Error retrieving chirps")
+			return
+		}
+	} else {
+		parsed_user_id, err := uuid.Parse(author_id)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Error parsing author id to uuid")
+			return
+		}
+		chirps, err = cfg.DB.AllchirpsFromUser(r.Context(), parsed_user_id)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Error retrieving chirps from specified user")
+			return
+		}
 	}
+
 	var allChirps []Chirp
 	for _, chirp := range chirps {
 		newChirp := Chirp{
@@ -239,6 +258,9 @@ func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
 			User_id:   chirp.UserID,
 		}
 		allChirps = append(allChirps, newChirp)
+	}
+	if sorting == "desc" {
+		sort.Slice(allChirps, func(i, j int) bool { return allChirps[i].CreatedAt.After(allChirps[j].CreatedAt) })
 	}
 	respondWithJSON(w, http.StatusOK, allChirps)
 }
